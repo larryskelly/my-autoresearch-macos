@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh auth:*)",
+      "Bash(echo $VIRTUAL_ENV)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(grep -A 20 \"^---$\" /Users/lskelly/Repositories/my-repositories/autoresearch-macos/run.log | tail -15)",
+      "WebSearch",
+      "WebFetch(domain:www.cpu-monkey.com)",
+      "WebFetch(domain:flopper.io)",
+      "WebFetch(domain:nanoreview.net)",
+      "WebFetch(domain:en.wikipedia.org)",
+      "WebFetch(domain:www.notebookcheck.net)",
+      "Bash(sysctl -n machdep.cpu.brand_string)"
+    ]
+  }
+}
