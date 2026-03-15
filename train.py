@@ -12,6 +12,7 @@ import gc
 import time
 from dataclasses import dataclass, asdict
 
+import subprocess
 import sys
 import torch
 import torch.nn as nn
@@ -486,9 +487,9 @@ WINDOW_PATTERN = "L"    # sliding window pattern: L=full, S=half context
 
 # Optimization
 TOTAL_BATCH_SIZE = 2**16 # ~65K tokens per optimizer step
-EMBEDDING_LR = 0.6      # learning rate for token embeddings (Adam)
-UNEMBEDDING_LR = 0.004  # learning rate for lm_head (Adam)
-MATRIX_LR = 0.04        # learning rate for matrix parameters (Muon)
+EMBEDDING_LR = 0.8      # learning rate for token embeddings (Adam)
+UNEMBEDDING_LR = 0.006  # learning rate for lm_head (Adam)
+MATRIX_LR = 0.06        # learning rate for matrix parameters (Muon)
 SCALAR_LR = 0.5         # learning rate for per-layer scalars (Adam)
 WEIGHT_DECAY = 0.2      # cautious weight decay for Muon
 ADAM_BETAS = (0.8, 0.95) # Adam beta1, beta2
@@ -523,7 +524,41 @@ else:
     import contextlib
     autocast_ctx = contextlib.nullcontext()
 
-H100_BF16_PEAK_FLOPS = 989.5e12
+def get_device_peak_flops(device_type):
+    """Return peak FLOPS for the current device. FP32 for MPS, BF16 for CUDA."""
+    peak_flops = {
+        # NVIDIA
+        "h100":            989.5e12,
+        # Apple Silicon — FP32 (MPS has no native bfloat16)
+        # Values from Flopper.io / cpu-monkey; Apple doesn't publish official TFLOPS.
+        # Keys match exact output of: sysctl -n machdep.cpu.brand_string
+        # M4 keys verified on hardware. M5 keys are a guess — update if sysctl differs.
+        "Apple M1":        2.6e12,
+        "Apple M2":        3.6e12,
+        "Apple M3":        4.1e12,
+        "Apple M4":        4.26e12,   # 10 GPU cores
+        "Apple M4 Pro":    9.2e12,    # 20 GPU cores
+        "Apple M4 Max":   18.4e12,    # 40 GPU cores
+        "Apple M5":        4.15e12,   # 10 GPU cores
+        "Apple M5 Pro":    8.3e12,    # 20 GPU cores
+        "Apple M5 Max":   16.6e12,    # 40 GPU cores
+    }
+    if device_type == "cuda":
+        return peak_flops["h100"]
+    if device_type == "mps":
+        try:
+            chip = subprocess.check_output(["sysctl", "-n", "machdep.cpu.brand_string"]).decode().strip()
+        except Exception:
+            chip = "unknown"
+        flops = peak_flops.get(chip, 0)
+        if flops == 0:
+            print(f"Warning: No FLOPS data for '{chip}', MFU will show 0%")
+        else:
+            print(f"Detected {chip} — peak FP32: {flops/1e12:.2f} TFLOPS")
+        return flops if flops > 0 else float("inf")
+    return float("inf")
+
+DEVICE_PEAK_FLOPS = get_device_peak_flops(device_type)
 
 tokenizer = Tokenizer.from_directory()
 vocab_size = tokenizer.get_vocab_size()
@@ -655,7 +690,7 @@ while True:
     debiased_smooth_loss = smooth_train_loss / (1 - ema_beta**(step + 1))
     pct_done = 100 * progress
     tok_per_sec = int(TOTAL_BATCH_SIZE / dt)
-    mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE / dt / H100_BF16_PEAK_FLOPS
+    mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE / dt / DEVICE_PEAK_FLOPS
     remaining = max(0, TIME_BUDGET - total_training_time)
 
     print(f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt*1000:.0f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.1f}% | epoch: {epoch} | remaining: {remaining:.0f}s    ", end="", flush=True)
@@ -686,9 +721,11 @@ with autocast_ctx:
 # Final summary
 t_end = time.time()
 startup_time = t_start_training - t_start
-steady_state_mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE * (step - 10) / total_training_time / H100_BF16_PEAK_FLOPS if total_training_time > 0 else 0
+steady_state_mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE * (step - 10) / total_training_time / DEVICE_PEAK_FLOPS if total_training_time > 0 else 0
 if device_type == "cuda":
     peak_vram_mb = torch.cuda.max_memory_allocated() / 1024 / 1024
+elif device_type == "mps":
+    peak_vram_mb = torch.mps.driver_allocated_memory() / 1024 / 1024
 else:
     peak_vram_mb = 0.0
 
